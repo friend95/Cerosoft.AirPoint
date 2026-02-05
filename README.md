@@ -22,6 +22,17 @@ This project is designed like a real system tool — not a toy app. Clean WPF UI
 
 ---
 
+## Related Repositories
+
+### Client (Android)
+The Android client application that connects to this server:
+
+👉 https://github.com/friend95/Cerosoft.AirPoint.Client
+
+Use this repository alongside the server for the complete AirPoint experience.
+
+---
+
 ## Tech Stack
 - **.NET (WPF)**
 - **C#**
