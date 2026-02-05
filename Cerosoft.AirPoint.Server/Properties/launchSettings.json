@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Cerosoft.AirPoint.Server (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "Cerosoft.AirPoint.Server (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
