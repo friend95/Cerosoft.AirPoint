@@ -1,30 +1,30 @@
 #nullable enable
 
+using Microsoft.UI;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using QRCoder;
 using System;
+using System.Buffers;
 using System.IO;
 using System.Linq;
 using System.Net;
-using System.Net.Sockets;
-using Windows.Storage.Streams;
-using QRCoder;
-using Microsoft.UI;
-using Microsoft.UI.Windowing;
-using System.Runtime.InteropServices;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using Windows.Devices.Bluetooth.Rfcomm;
+using Windows.Devices.Radios;
+using Windows.Graphics;
+using Windows.Networking.Sockets;
+using Windows.Storage.Streams;
+using Windows.System;
 using WindowsInput;
 using WindowsInput.Native;
-using Windows.Graphics;
-using Windows.Devices.Bluetooth;
-using Windows.Devices.Bluetooth.Rfcomm;
-using Windows.Networking.Sockets;
-using Windows.Devices.Radios;
-using Windows.System;
 
 namespace Cerosoft.AirPoint.Server
 {
@@ -38,12 +38,20 @@ namespace Cerosoft.AirPoint.Server
         private StreamSocketListener? _bluetoothListener;
         private RfcommServiceProvider? _rfcommProvider;
         private bool _isRunning = false;
-        private readonly InputSimulator _inputSim = new();
+
+        // Optimization (CA1822): Promoted to static as InputSimulator is stateless/global
+        private static readonly InputSimulator _inputSim = new();
         private static readonly Guid _bluetoothServiceUuid = Guid.Parse("00001101-0000-1000-8000-00805F9B34FB");
 
         // --- NATIVE MOUSE CONSTANTS & IMPORT ---
-        [DllImport("user32.dll", SetLastError = true)]
-        static extern void mouse_event(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
+
+        // INDUSTRY GRADE FIX: 
+        // Switched to [DllImport] to resolve CS8795 (Source Generator failure).
+        // Suppressed SYSLIB1054 to strictly allow runtime marshalling for stability.
+#pragma warning disable SYSLIB1054
+        [DllImport("user32.dll", EntryPoint = "mouse_event", SetLastError = true)]
+        private static extern void MouseEvent(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
+#pragma warning restore SYSLIB1054
 
         private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
         private const uint MOUSEEVENTF_LEFTUP = 0x0004;
@@ -73,11 +81,13 @@ namespace Cerosoft.AirPoint.Server
             WindowId wndId = Win32Interop.GetWindowIdFromWindow(hWnd);
             m_appWindow = AppWindow.GetFromWindowId(wndId);
 
+            // Resize window using Windows.Graphics.SizeInt32
             m_appWindow.Resize(new SizeInt32(500, 750));
 
             string iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
             m_appWindow.SetIcon(iconPath);
 
+            // Modernization: Pattern Matching for safe casting
             if (m_appWindow.Presenter is OverlappedPresenter presenter)
             {
                 presenter.IsResizable = false;
@@ -93,7 +103,7 @@ namespace Cerosoft.AirPoint.Server
             if (AppSettings.MinimizeToTray)
             {
                 args.Cancel = true; // Stop the close event
-                if (m_appWindow != null && m_appWindow.Presenter is OverlappedPresenter presenter)
+                if (m_appWindow?.Presenter is OverlappedPresenter presenter)
                 {
                     presenter.Minimize();
                 }
@@ -107,13 +117,13 @@ namespace Cerosoft.AirPoint.Server
             {
                 string runKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
                 using Microsoft.Win32.RegistryKey? key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(runKey, true);
-                if (key != null)
+                if (key is not null)
                 {
                     string appName = "CerosoftAirPoint";
                     if (AppSettings.RunAtStartup)
                     {
                         string? exePath = Environment.ProcessPath;
-                        if (exePath != null) key.SetValue(appName, $"\"{exePath}\"");
+                        if (exePath is not null) key.SetValue(appName, $"\"{exePath}\"");
                     }
                     else
                     {
@@ -128,22 +138,28 @@ namespace Cerosoft.AirPoint.Server
 
         private async void GenerateQrCode(string content)
         {
-            QRCodeGenerator qrGenerator = new();
-            QRCodeData qrCodeData = qrGenerator.CreateQrCode(content, QRCodeGenerator.ECCLevel.Q);
-            PngByteQRCode qrCode = new(qrCodeData);
-
-            byte[] qrCodeBytes = qrCode.GetGraphic(20, [0, 0, 0, 255], [0, 0, 0, 0]);
-
-            using InMemoryRandomAccessStream stream = new();
-            using (DataWriter writer = new(stream.GetOutputStreamAt(0)))
+            await Task.Run(async () =>
             {
-                writer.WriteBytes(qrCodeBytes);
-                await writer.StoreAsync();
-            }
-            stream.Seek(0);
-            BitmapImage image = new();
-            await image.SetSourceAsync(stream);
-            QrImage.Source = image;
+                QRCodeGenerator qrGenerator = new();
+                QRCodeData qrCodeData = qrGenerator.CreateQrCode(content, QRCodeGenerator.ECCLevel.Q);
+                PngByteQRCode qrCode = new(qrCodeData);
+
+                byte[] qrCodeBytes = qrCode.GetGraphic(20, [0, 0, 0, 255], [0, 0, 0, 0]);
+
+                this.DispatcherQueue.TryEnqueue(async () =>
+                {
+                    using InMemoryRandomAccessStream stream = new();
+                    using (DataWriter writer = new(stream.GetOutputStreamAt(0)))
+                    {
+                        writer.WriteBytes(qrCodeBytes);
+                        await writer.StoreAsync();
+                    }
+                    stream.Seek(0);
+                    BitmapImage image = new();
+                    await image.SetSourceAsync(stream);
+                    QrImage.Source = image;
+                });
+            });
         }
 
         private async void InitializeNetworkAndServer()
@@ -151,8 +167,8 @@ namespace Cerosoft.AirPoint.Server
             _isRunning = false;
             _tcpServer?.Stop();
 
-            if (_rfcommProvider != null) { try { _rfcommProvider.StopAdvertising(); } catch { } _rfcommProvider = null; }
-            if (_bluetoothListener != null) { try { await _bluetoothListener.CancelIOAsync(); } catch { } _bluetoothListener.Dispose(); _bluetoothListener = null; }
+            if (_rfcommProvider is not null) { try { _rfcommProvider.StopAdvertising(); } catch { } _rfcommProvider = null; }
+            if (_bluetoothListener is not null) { try { await _bluetoothListener.CancelIOAsync(); } catch { } _bluetoothListener.Dispose(); _bluetoothListener = null; }
 
             if (AppSettings.IsWifiPreferred)
             {
@@ -183,7 +199,7 @@ namespace Cerosoft.AirPoint.Server
             {
                 var radios = await Radio.GetRadiosAsync();
                 var bluetoothRadio = radios.FirstOrDefault(r => r.Kind == RadioKind.Bluetooth);
-                if (bluetoothRadio == null) { UpdateStatus("Error: No Bluetooth Adapter found.", false); return false; }
+                if (bluetoothRadio is null) { UpdateStatus("Error: No Bluetooth Adapter found.", false); return false; }
                 if (bluetoothRadio.State == RadioState.Off) { await ShowBluetoothOffDialog(); return false; }
                 return true;
             }
@@ -215,7 +231,7 @@ namespace Cerosoft.AirPoint.Server
                 UpdateStatus("Ready for Wi-Fi Connection", false);
                 await Task.Run(async () =>
                 {
-                    while (_isRunning && _tcpServer != null)
+                    while (_isRunning && _tcpServer is not null)
                     {
                         try
                         {
@@ -263,23 +279,30 @@ namespace Cerosoft.AirPoint.Server
             catch { }
         }
 
+        // Modernization: Use ArrayPool to prevent GC pressure (Industry Grade)
         private async Task HandleStreamAsync(System.IO.Stream stream)
         {
-            byte[] buffer = new byte[8192]; // Increased buffer size for smoother text
+            byte[] buffer = ArrayPool<byte>.Shared.Rent(8192);
             int bytesRead;
             try
             {
                 while ((bytesRead = await stream.ReadAsync(buffer)) != 0)
                 {
+                    // Pass only the relevant slice of data
                     ProcessCommand(buffer[0], buffer, bytesRead);
                 }
             }
             catch { }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
             this.DispatcherQueue.TryEnqueue(() => { if (_isRunning) UpdateStatus("Waiting for connection...", false); });
         }
 
         // --- INPUT PROCESSING ---
-        private void ProcessCommand(byte command, byte[] data, int length)
+        // Optimization (CA1822): Changed to static as it accesses static _inputSim
+        private static void ProcessCommand(byte command, byte[] data, int length)
         {
             try
             {
@@ -355,13 +378,15 @@ namespace Cerosoft.AirPoint.Server
             catch { }
         }
 
-        private void SimulateText(string text)
+        // Optimization (CA1822): Changed to static
+        private static void SimulateText(string text)
         {
             // WindowsInput handles special chars automatically
             _inputSim.Keyboard.TextEntry(text);
         }
 
-        private void SimulateKey(int keyCode)
+        // Optimization (CA1822): Changed to static
+        private static void SimulateKey(int keyCode)
         {
             switch (keyCode)
             {
@@ -370,13 +395,15 @@ namespace Cerosoft.AirPoint.Server
             }
         }
 
-        private void SimulateRightClick()
+        // Optimization (CA1822): Changed to static
+        private static void SimulateRightClick()
         {
             // Perform a Right Mouse Button Click (Down + Up)
-            mouse_event(MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+            MouseEvent(MOUSEEVENTF_RIGHTDOWN | MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
         }
 
-        private void HandleShortcut(byte code)
+        // Optimization (CA1822): Changed to static
+        private static void HandleShortcut(byte code)
         {
             switch (code)
             {
@@ -426,7 +453,7 @@ namespace Cerosoft.AirPoint.Server
             if (this.DispatcherQueue.HasThreadAccess)
             {
                 StatusText.Text = text;
-                StatusDot.Fill = new SolidColorBrush(isConnected ? Microsoft.UI.Colors.Green : Microsoft.UI.Colors.Orange);
+                StatusDot.Fill = new SolidColorBrush(isConnected ? Colors.Green : Colors.Orange);
             }
             else
             {
@@ -437,7 +464,7 @@ namespace Cerosoft.AirPoint.Server
         private async void OnSettingsClick(object sender, RoutedEventArgs e)
         {
             SettingsDialog dialog = new();
-            if (this.Content != null && this.Content.XamlRoot != null)
+            if (this.Content is { XamlRoot: not null })
             {
                 dialog.XamlRoot = this.Content.XamlRoot;
                 await dialog.ShowAsync();
@@ -462,31 +489,46 @@ namespace Cerosoft.AirPoint.Server
 
         private void SetTheme()
         {
-            if (m_configurationSource == null) return;
+            if (m_configurationSource is null) return;
             var currentTheme = ((FrameworkElement)this.Content).ActualTheme;
             m_configurationSource.Theme = currentTheme == ElementTheme.Dark ? Microsoft.UI.Composition.SystemBackdrops.SystemBackdropTheme.Dark : (currentTheme == ElementTheme.Light ? Microsoft.UI.Composition.SystemBackdrops.SystemBackdropTheme.Light : Microsoft.UI.Composition.SystemBackdrops.SystemBackdropTheme.Default);
-            if (AppWindowTitleBar.IsCustomizationSupported() && m_appWindow != null) m_appWindow.TitleBar.ButtonForegroundColor = (m_configurationSource.Theme == Microsoft.UI.Composition.SystemBackdrops.SystemBackdropTheme.Dark) ? Colors.White : Colors.Black;
+            if (AppWindowTitleBar.IsCustomizationSupported() && m_appWindow is not null) m_appWindow.TitleBar.ButtonForegroundColor = (m_configurationSource.Theme == Microsoft.UI.Composition.SystemBackdrops.SystemBackdropTheme.Dark) ? Colors.White : Colors.Black;
         }
     }
 
-    class WindowsSystemDispatcherQueueHelper
+    // Helper Class
+    partial class WindowsSystemDispatcherQueueHelper
     {
-        [StructLayout(LayoutKind.Sequential)] struct DispatcherQueueOptions { internal int dwSize; internal int threadType; internal int apartmentType; }
-        [DllImport("CoreMessaging.dll")] private static extern int CreateDispatcherQueueController([In] DispatcherQueueOptions options, [In, Out, MarshalAs(UnmanagedType.IUnknown)] ref object? dispatcherQueueController);
+        [StructLayout(LayoutKind.Sequential)]
+        struct DispatcherQueueOptions { internal int dwSize; internal int threadType; internal int apartmentType; }
+
+        // INDUSTRY GRADE FIX: 
+        // Reverted to [DllImport] to fix CS8795. Suppressing SYSLIB1054 for stable runtime marshalling.
+#pragma warning disable SYSLIB1054
+        [DllImport("CoreMessaging.dll")]
+        private static extern int CreateDispatcherQueueController(DispatcherQueueOptions options, ref IntPtr dispatcherQueueController);
+#pragma warning restore SYSLIB1054
+
         object? m_dispatcherQueueController = null;
         public void EnsureWindowsSystemDispatcherQueueController()
         {
-            if (Windows.System.DispatcherQueue.GetForCurrentThread() != null) return;
-            if (m_dispatcherQueueController == null)
+            if (Windows.System.DispatcherQueue.GetForCurrentThread() is not null) return;
+            if (m_dispatcherQueueController is null)
             {
                 DispatcherQueueOptions options;
                 options.dwSize = Marshal.SizeOf<DispatcherQueueOptions>();
                 options.threadType = 2; options.apartmentType = 2;
 
-                int hr = CreateDispatcherQueueController(options, ref m_dispatcherQueueController);
+                IntPtr ptr = IntPtr.Zero;
+                int hr = CreateDispatcherQueueController(options, ref ptr);
                 if (hr != 0)
                 {
                     Marshal.ThrowExceptionForHR(hr);
+                }
+
+                if (ptr != IntPtr.Zero)
+                {
+                    m_dispatcherQueueController = Marshal.GetObjectForIUnknown(ptr);
                 }
             }
         }
