@@ -25,6 +25,8 @@ using Windows.Storage.Streams;
 using Windows.System;
 using WindowsInput;
 using WindowsInput.Native;
+using System.Text.RegularExpressions;
+using System.Diagnostics; // Added for ProcessStartInfo
 
 namespace Cerosoft.AirPoint.Server
 {
@@ -47,7 +49,7 @@ namespace Cerosoft.AirPoint.Server
 
         // INDUSTRY GRADE FIX: 
         // Switched to [DllImport] to resolve CS8795 (Source Generator failure).
-        // Suppressed SYSLIB1054 to strictly allow runtime marshalling for stability.
+        // Suppressing SYSLIB1054 to strictly allow runtime marshalling for stability.
 #pragma warning disable SYSLIB1054
         [DllImport("user32.dll", EntryPoint = "mouse_event", SetLastError = true)]
         private static extern void MouseEvent(uint dwFlags, uint dx, uint dy, uint dwData, int dwExtraInfo);
@@ -416,16 +418,86 @@ namespace Cerosoft.AirPoint.Server
             }
         }
 
+        // --- INTELLIGENT DISPATCHER (Robust URL/File/Command Handler) ---
+
+        // Optimization: Compiled Regex for maximum performance (Fixes SYSLIB1045)
+        [GeneratedRegex(@"^[a-zA-Z0-9\+\.\-]+://")]
+        private static partial Regex ProtocolRegex();
+
         private static void OpenUrlOrFile(string content)
         {
+            if (string.IsNullOrWhiteSpace(content)) return;
+
+            content = content.Trim();
+
             try
             {
-                bool isFilePath = content.Contains(":\\") || content.Contains(":/") || content.StartsWith("\\\\");
-                if (!isFilePath && !content.StartsWith("http")) content = "https://" + content;
-                new System.Diagnostics.Process { StartInfo = new System.Diagnostics.ProcessStartInfo(content) { UseShellExecute = true } }.Start();
+                // CASE 1: Custom Protocols (Steam, Spotify, Magnet, Mailto)
+                if (ProtocolRegex().IsMatch(content))
+                {
+                    StartProcess(content);
+                    return;
+                }
+
+                // CASE 2: Complex Command Lines (Quoted Paths with Arguments)
+                // Fix CA1866: Use char overload for performance
+                if (content.StartsWith('"'))
+                {
+                    int endQuoteIndex = content.IndexOf('"', 1);
+                    if (endQuoteIndex > 1)
+                    {
+                        // Fix IDE0057: Use modern C# Range operators
+                        string executable = content[1..endQuoteIndex];
+                        string arguments = content[(endQuoteIndex + 1)..].Trim();
+
+                        if (File.Exists(executable))
+                        {
+                            StartProcess(executable, arguments);
+                            return;
+                        }
+                    }
+                }
+
+                // CASE 3: Local Files, Directories, or Shortcuts (.lnk)
+                if (File.Exists(content) || Directory.Exists(content))
+                {
+                    StartProcess(content);
+                    return;
+                }
+
+                // CASE 4: Web URL Fallback
+                if (!content.StartsWith("http", StringComparison.OrdinalIgnoreCase) &&
+                    !content.StartsWith("www", StringComparison.OrdinalIgnoreCase))
+                {
+                    content = "https://" + content;
+                }
+                else if (content.StartsWith("www", StringComparison.OrdinalIgnoreCase))
+                {
+                    content = "https://" + content;
+                }
+
+                StartProcess(content);
             }
-            catch { }
+            // Fix CS0168 & IDE0059: Removed unused 'ex' variable
+            catch
+            {
+                // Log failure in production if needed
+            }
         }
+
+        private static void StartProcess(string fileName, string arguments = "")
+        {
+            var info = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments,
+                UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(fileName) ?? ""
+            };
+            Process.Start(info);
+        }
+
+        // --- END INTELLIGENT DISPATCHER ---
 
         private static string GetBestLocalIpAddress()
         {
